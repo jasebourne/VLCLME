@@ -186,7 +186,8 @@ with col1:
         preview_cols = st.columns(min(len(uploaded_files), 5)) # Show up to 5 previews per row
         for i, file in enumerate(uploaded_files):
             # Show a smaller preview
-            preview_cols[i % 5].image(file, caption=file.name, use_column_width=True)
+            # FIX: Replaced deprecated use_column_width with use_container_width
+            preview_cols[i % 5].image(file, caption=file.name, use_container_width=True)
 
     # 2. Process Button
     st.button(
