@@ -1,75 +1,242 @@
-
-import numpy as np
-import cv2
-import pytesseract
-import re
-import pandas as pd
 import streamlit as st
-import io
+import requests
+import base64
+import json
+import pandas as pd
+from io import BytesIO
 
-st.title('Name and Number Extractor from Image')
-uploaded_file = st.file_uploader("Upload an image", type=['png', 'jpg', 'jpeg'])
+# --- Configuration and Initialization ---
 
-def extract_name_number_pairs(text):
-    # Refined regex to handle variations and Unicode letters
-    # \w with re.UNICODE will match accented characters
-    pattern = re.compile(r'([\w\s.-]+)\s*(\d+)', re.UNICODE)
-    pairs = pattern.findall(text)
-    cleaned_pairs = [(name.strip(), number) for name, number in pairs]
-    return cleaned_pairs
+# Set up the page title and layout
+st.set_page_config(layout="wide", page_title="AI Multi-Image Exporter")
+st.title("AI Multi-Image Exporter")
+st.markdown("Upload multiple images, extract data with Google AI, and export to a single CSV.")
 
+# Initialize session state for data storage
+if 'extracted_data' not in st.session_state:
+    st.session_state.extracted_data = []
+if 'files_to_process' not in st.session_state:
+    st.session_state.files_to_process = []
+if 'status_message' not in st.session_state:
+    st.session_state.status_message = "Ready to process images."
 
-if uploaded_file is not None:
+# --- API Key Setup (Mimicking JS logic for local use) ---
+# In a real deployed Streamlit app, you would use st.secrets['GEMINI_API_KEY']
+API_KEY = "AIzaSyCzLdSYJFl7WsfZjPvOmhz11FDJJZxunWU"  # REPLACE THIS EMPTY STRING WITH YOUR GEMINI API KEY FOR LOCAL TESTING
+
+# --- Functions ---
+
+def convert_to_base64_and_mime(uploaded_file):
+    """Converts a Streamlit uploaded file object to Base64 and extracts MIME type."""
     try:
-        # Read the uploaded file as bytes
-        file_bytes = np.asarray(bytearray(uploaded_file.read()), dtype=np.uint8)
-        # Decode the image using OpenCV
-        img = cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)
-        st.image(img, caption='Uploaded Image', use_column_width=True)
-
-        # Basic image preprocessing (Convert to grayscale and apply a simple threshold)
-        gray_img = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-        _, thresh_img = cv2.threshold(gray_img, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-
-        # Extract text using pytesseract on the preprocessed image
-        # Use lang='eng' by default, but you can add more languages if needed (e.g., 'eng+fra+deu')
-        extracted_text = pytesseract.image_to_string(thresh_img, lang='eng')
-        st.write("Extracted Text:")
-        st.write(extracted_text)
-
-        # Parse extracted text
-        name_number_pairs = extract_name_number_pairs(extracted_text)
-
-        # Check if any pairs were found
-        if name_number_pairs:
-            st.write("Identified Name-Number Pairs:")
-            df_results = pd.DataFrame(name_number_pairs, columns=['Name', 'Number'])
-            st.dataframe(df_results)
-        else:
-            st.write("No name-number pairs found in the extracted text.")
-            df_results = pd.DataFrame(columns=['Name', 'Number']) # Create empty DF even if no pairs
-
+        # Go to the start of the file before reading
+        uploaded_file.seek(0)
+        
+        # Read the file content as bytes
+        image_bytes = uploaded_file.read()
+        
+        # Encode bytes to Base64 string
+        base64_data = base64.b64encode(image_bytes).decode('utf-8')
+        
+        # Get MIME type directly from the file object
+        mime_type = uploaded_file.type
+        
+        return mime_type, base64_data
     except Exception as e:
-        st.error(f"An error occurred during image processing or text extraction: {e}")
-        df_results = pd.DataFrame(columns=['Name', 'Number']) # Ensure df_results is defined on error
-else:
-    # Ensure df_results is defined when no file is uploaded
-    df_results = pd.DataFrame(columns=['Name', 'Number'])
+        st.error(f"Error reading file: {e}")
+        return None, None
 
-# Display the DataFrame if it's not empty (will be empty on error or no pairs found)
-if 'df_results' in locals() and not df_results.empty:
-    st.subheader("Extracted Name and Number Data:")
-    st.dataframe(df_results)
-    # Add download button for UTF-8 CSV export
-    csv_buffer = io.StringIO()
-    df_results.to_csv(csv_buffer, index=False, encoding='utf-8')
-    st.download_button(
-        label="Download results as CSV",
-        data=csv_buffer.getvalue(),
-        file_name="name_number_results.csv",
-        mime="text/csv",
+def call_gemini_api(mime_type, base64_data, api_key):
+    """Makes the API call to the Gemini model."""
+    if not api_key:
+        raise ValueError("API Key is missing. Please provide your Gemini API key.")
+        
+    API_URL = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-05-20:generateContent?key={api_key}"
+    
+    prompt = """
+        From the provided image of a leaderboard, extract the names and their corresponding scores. 
+        Return the result as a JSON array of objects, where each object has a 'name' and a 'number' key. 
+        For example: [{ "name": "Player1", "number": 123 }]. 
+        Do not include any other text, explanations, or markdown formatting in your response. Just the raw JSON array.
+    """
+
+    payload = {
+        "contents": [{
+            "role": "user",
+            "parts": [
+                {"text": prompt},
+                {"inlineData": {"mimeType": mime_type, "data": base64_data}}
+            ]
+        }],
+    }
+
+    # API call with a simple retry mechanism
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            response = requests.post(API_URL, headers={'Content-Type': 'application/json'}, json=payload)
+            response.raise_for_status() # Raises an HTTPError if the status is 4xx or 5xx
+            return response.json()
+        except requests.exceptions.HTTPError as e:
+            if response.status_code == 403:
+                # Specific check for 403 Forbidden (API Key issue)
+                raise PermissionError("API call failed with status 403 Forbidden. Check your API key.")
+            
+            # General error handling and exponential backoff
+            last_error = e
+            delay = 2 ** attempt
+            if attempt < max_retries - 1:
+                import time
+                time.sleep(delay)
+        except requests.exceptions.RequestException as e:
+            last_error = e
+            delay = 2 ** attempt
+            if attempt < max_retries - 1:
+                import time
+                time.sleep(delay)
+    
+    raise last_error # Raise the last encountered error
+
+def parse_and_store_results(result):
+    """Extracts and cleans the JSON result from the API response."""
+    candidate = result.get('candidates', [{}])[0]
+    response_text = candidate.get('content', {}).get('parts', [{}])[0].get('text', '')
+    
+    # Clean up potential markdown wrappers (```json ... ```)
+    cleaned_json_string = response_text.strip().replace('```json', '').replace('```', '').strip()
+    
+    try:
+        data = json.loads(cleaned_json_string)
+        if isinstance(data, list):
+            st.session_state.extracted_data.extend(data)
+        else:
+            st.warning(f"AI response was not a JSON list: {cleaned_json_string}")
+    except json.JSONDecodeError:
+        st.error(f"Failed to parse JSON from AI response: {cleaned_json_string[:100]}...")
+
+def process_images():
+    """Main processing logic for all uploaded images."""
+    st.session_state.extracted_data = []
+    error_count = 0
+    
+    if not st.session_state.files_to_process:
+        st.session_state.status_message = 'Please upload one or more images first.'
+        return
+
+    # Use Streamlit's status container for visual feedback
+    with st.status("Processing images...", expanded=True) as status_box:
+        
+        for i, uploaded_file in enumerate(st.session_state.files_to_process):
+            st.write(f"Processing image {i + 1} of {len(st.session_state.files_to_process)}: {uploaded_file.name}")
+            
+            # 1. Convert to Base64
+            mime_type, base64_data = convert_to_base64_and_mime(uploaded_file)
+            if not base64_data:
+                error_count += 1
+                continue
+            
+            # 2. Call the API
+            try:
+                result = call_gemini_api(mime_type, base64_data, API_KEY)
+                # 3. Parse and Store Results
+                parse_and_store_results(result)
+            except PermissionError as e:
+                st.error(str(e))
+                status_box.update(label="Processing Failed", state="error", expanded=True)
+                return
+            except Exception as e:
+                st.error(f"Error processing {uploaded_file.name}: {e}")
+                error_count += 1
+
+        # 4. Final Status Update
+        total_records = len(st.session_state.extracted_data)
+        success_count = len(st.session_state.files_to_process) - error_count
+        
+        final_status = f"Found a total of {total_records} records from {success_count} successfully processed image(s)."
+        if error_count > 0:
+            final_status += f" ({error_count} image(s) failed to process.)"
+            status_box.update(label=f"Processing Complete with Errors: {final_status}", state="error", expanded=False)
+        else:
+            status_box.update(label=f"Processing Complete: {final_status}", state="complete", expanded=False)
+            
+        st.session_state.status_message = final_status
+
+# --- UI Layout ---
+
+col1, col2 = st.columns(2)
+
+with col1:
+    st.subheader("Image Upload & Controls")
+    
+    # 1. Image Uploader (Replacing the hidden input and file reader)
+    uploaded_files = st.file_uploader(
+        "Upload Image(s)", 
+        type=["png", "jpg", "jpeg"], 
+        accept_multiple_files=True,
+        help="Upload images containing names and scores (e.g., leaderboards)."
     )
-elif 'df_results' in locals() and df_results.empty:
-    # This case is handled by the "No name-number pairs found" message or the error message,
-    # so no extra message is needed here.
-    pass
+
+    if uploaded_files:
+        if uploaded_files != st.session_state.files_to_process:
+            st.session_state.files_to_process = uploaded_files
+            st.session_state.status_message = f"{len(uploaded_files)} image(s) loaded. Ready to process."
+        
+        # Display image previews (similar to the JS version)
+        st.caption("Image Previews:")
+        preview_cols = st.columns(min(len(uploaded_files), 5)) # Show up to 5 previews per row
+        for i, file in enumerate(uploaded_files):
+            # Show a smaller preview
+            # FIX: Replaced deprecated use_column_width with use_container_width
+            preview_cols[i % 5].image(file, caption=file.name, use_container_width=True)
+
+    # 2. Process Button
+    st.button(
+        "Process Images with AI",
+        on_click=process_images,
+        disabled=not st.session_state.files_to_process,
+        use_container_width=True,
+        type="primary"
+    )
+    
+    # 3. Status Display
+    st.info(st.session_state.status_message)
+
+
+with col2:
+    st.subheader("Combined Results")
+    
+    if st.session_state.extracted_data:
+        # 1. Display Results in a DataFrame
+        df = pd.DataFrame(st.session_state.extracted_data)
+        st.dataframe(df, use_container_width=True, height=400)
+        
+        # 2. Export Button
+        csv_data = df.to_csv(index=False).encode('utf-8')
+        st.download_button(
+            label="Export to CSV",
+            data=csv_data,
+            file_name="leaderboard_data_combined.csv",
+            mime="text/csv",
+            use_container_width=True
+        )
+    else:
+        st.markdown(
+            """
+            <div style="padding: 100px; text-align: center; color: #9ca3af;">
+                Process image(s) to see results.
+            </div>
+            """, 
+            unsafe_allow_html=True
+        )
+
+# --- API Key Warning for Local Testing (mimics 403 error logic) ---
+if not API_KEY:
+    st.warning("⚠️ **API Key Warning**")
+    st.markdown(
+        """
+        Since you are running this locally, you must replace the empty string for `API_KEY` 
+        in `streamlit_app.py` with your actual Gemini API Key to avoid a 403 Forbidden error.
+        
+        For deployment, use Streamlit Secrets instead of hardcoding the key.
+        """
+    )
