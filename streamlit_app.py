@@ -1,50 +1,17 @@
-import os
+import streamlit as st
 import base64
 import requests
 import json
-import glob
-import csv
-from PIL import Image
-import io
+import pandas as pd
 
-def get_api_key():
+def image_to_base64(uploaded_file):
     """
-    Retrieves the Gemini API key from an environment variable.
-    Raises an error if the key is not found.
+    Converts an uploaded file object (from Streamlit) to a base64 encoded string.
     """
-    api_key = os.environ.get("GEMINI_API_KEY")
-    if not api_key:
-        raise ValueError("GEMINI_API_KEY environment variable not set. Please set it to your Google AI API key.")
-    return api_key
-
-def image_to_base64(image_path):
-    """
-    Converts an image file to a base64 encoded string and gets its MIME type.
-    """
-    try:
-        with Image.open(image_path) as img:
-            # Determine MIME type from image format
-            format = img.format
-            if format == 'JPEG':
-                mime_type = 'image/jpeg'
-            elif format == 'PNG':
-                mime_type = 'image/png'
-            else:
-                # Fallback for other types, save to a buffer to get bytes
-                buffer = io.BytesIO()
-                img.save(buffer, format='PNG')
-                mime_type = 'image/png'
-                img_bytes = buffer.getvalue()
-            
-            if 'img_bytes' not in locals():
-                 with open(image_path, "rb") as image_file:
-                    img_bytes = image_file.read()
-
-        base64_string = base64.b64encode(img_bytes).decode('utf-8')
-        return base64_string, mime_type
-    except Exception as e:
-        print(f"Error processing image {image_path}: {e}")
-        return None, None
+    img_bytes = uploaded_file.getvalue()
+    base64_string = base64.b64encode(img_bytes).decode('utf-8')
+    mime_type = uploaded_file.type
+    return base64_string, mime_type
 
 def process_image_with_ai(base64_image, mime_type, api_key):
     """
@@ -74,7 +41,7 @@ def process_image_with_ai(base64_image, mime_type, api_key):
 
     try:
         response = requests.post(api_url, headers=headers, json=payload)
-        response.raise_for_status()  # Raises an HTTPError for bad responses
+        response.raise_for_status()
         
         result = response.json()
         candidate = result.get('candidates', [{}])[0]
@@ -82,85 +49,82 @@ def process_image_with_ai(base64_image, mime_type, api_key):
         
         if 'text' in content_part:
             response_text = content_part['text']
-            # Clean the response to ensure it's valid JSON
             cleaned_json_string = response_text.replace("```json", "").replace("```", "").strip()
             return json.loads(cleaned_json_string)
         else:
-            print("Warning: AI response did not contain text data.")
+            st.warning("AI response did not contain text data for one of the images.")
             return []
 
     except requests.exceptions.RequestException as e:
-        print(f"API request failed: {e}")
+        st.error(f"API request failed: {e}")
     except json.JSONDecodeError:
-        print(f"Failed to decode JSON from AI response: {response.text}")
+        st.error(f"Failed to decode JSON from AI response: {response.text}")
     except Exception as e:
-        print(f"An unexpected error occurred: {e}")
+        st.error(f"An unexpected error occurred: {e}")
     
     return []
 
-
-def write_to_csv(data, filename="leaderboard_data_combined.csv"):
-    """
-    Writes the extracted data to a CSV file with UTF-8 encoding (with BOM).
-    """
-    if not data:
-        print("No data to write to CSV.")
-        return
-        
-    # Using 'utf-8-sig' encoding to add a BOM, which helps Excel open the file correctly
-    with open(filename, mode='w', newline='', encoding='utf-8-sig') as csvfile:
-        fieldnames = ['Name', 'Number']
-        writer = csv.DictWriter(csvfile, fieldnames=fieldnames, extrasaction='ignore')
-
-        writer.writeheader()
-        # Rename keys to match fieldnames for DictWriter
-        for item in data:
-            writer.writerow({'Name': item.get('name'), 'Number': item.get('number')})
-
-    print(f"\nSuccessfully wrote {len(data)} records to {filename}")
-
-
 def main():
     """
-    Main function to orchestrate the image processing and CSV export.
+    Main function to define the Streamlit application UI and logic.
     """
-    print("--- AI Leaderboard Exporter ---")
-    try:
-        api_key = get_api_key()
-    except ValueError as e:
-        print(f"Error: {e}")
-        return
+    st.set_page_config(layout="wide")
+    st.title("🖼️ AI Leaderboard Exporter")
+    st.markdown("Upload multiple leaderboard images, extract data with Google AI, and download the results as a single CSV file.")
 
-    folder_path = input("Enter the path to the folder containing your images: ")
-    if not os.path.isdir(folder_path):
-        print(f"Error: The path '{folder_path}' is not a valid directory.")
-        return
+    with st.sidebar:
+        st.header("🔑 API Key")
+        api_key = st.text_input("Enter your Google AI API Key", type="password")
+        st.markdown("[Get an API key from Google AI Studio](https://aistudio.google.com/app/apikey)")
 
-    # Find all common image types
-    image_paths = glob.glob(os.path.join(folder_path, '*.png')) + \
-                  glob.glob(os.path.join(folder_path, '*.jpg')) + \
-                  glob.glob(os.path.join(folder_path, '*.jpeg'))
+    uploaded_files = st.file_uploader(
+        "Upload your leaderboard images",
+        type=['png', 'jpg', 'jpeg'],
+        accept_multiple_files=True
+    )
+    
+    if uploaded_files:
+        st.image(uploaded_files, width=150, caption=[f.name for f in uploaded_files])
 
-    if not image_paths:
-        print(f"No images found in '{folder_path}'.")
-        return
+    if st.button("🚀 Process Images"):
+        if not api_key:
+            st.warning("Please enter your Google AI API key in the sidebar.")
+        elif not uploaded_files:
+            st.warning("Please upload one or more images.")
+        else:
+            all_extracted_data = []
+            my_bar = st.progress(0, text="Starting processing...")
 
-    print(f"Found {len(image_paths)} images to process.")
-    all_extracted_data = []
+            for i, uploaded_file in enumerate(uploaded_files):
+                my_bar.progress((i + 1) / len(uploaded_files), text=f"Processing: {uploaded_file.name}")
+                
+                base64_image, mime_type = image_to_base64(uploaded_file)
+                extracted_data = process_image_with_ai(base64_image, mime_type, api_key)
+                if extracted_data:
+                    all_extracted_data.extend(extracted_data)
 
-    for i, path in enumerate(image_paths):
-        print(f"\nProcessing image {i + 1}/{len(image_paths)}: {os.path.basename(path)}...")
-        base64_image, mime_type = image_to_base64(path)
-        
-        if base64_image and mime_type:
-            extracted_data = process_image_with_ai(base64_image, mime_type, api_key)
-            if extracted_data:
-                all_extracted_data.extend(extracted_data)
-                print(f"  -> Extracted {len(extracted_data)} records.")
+            my_bar.empty()
+
+            if all_extracted_data:
+                st.success(f"Successfully extracted {len(all_extracted_data)} records from {len(uploaded_files)} images!")
+                
+                # Use pandas for robust data handling and CSV conversion
+                df = pd.DataFrame(all_extracted_data)
+                df.rename(columns={'name': 'Name', 'number': 'Number'}, inplace=True)
+                st.dataframe(df)
+
+                # Convert dataframe to CSV string, using utf-8-sig for Excel compatibility
+                csv = df.to_csv(index=False).encode('utf-8-sig')
+
+                st.download_button(
+                    label="⬇️ Download Results as CSV",
+                    data=csv,
+                    file_name="leaderboard_data_combined.csv",
+                    mime="text/csv",
+                )
             else:
-                print("  -> No records extracted from this image.")
-
-    write_to_csv(all_extracted_data)
+                st.error("Could not extract any data from the uploaded images. Please try with clearer images.")
 
 if __name__ == "__main__":
     main()
+
