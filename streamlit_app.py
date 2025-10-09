@@ -210,10 +210,10 @@ with col2:
         df = pd.DataFrame(st.session_state.extracted_data)
         st.dataframe(df, use_container_width=True, height=400)
         
-        # 2. Export Button
-        csv_data = df.to_csv(index=False).encode('utf-8')
+        # 2. Export Button (UTF-8 encoded)
+        csv_data = df.to_csv(index=False, encoding='utf-8').encode('utf-8')
         st.download_button(
-            label="Export to CSV",
+            label="Export to CSV (UTF-8 encoded)",
             data=csv_data,
             file_name="leaderboard_data_combined.csv",
             mime="text/csv",
